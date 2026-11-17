@@ -116,7 +116,7 @@ def _merge_wrapped(rows: list[list[int]], boxes: np.ndarray) -> list[list[int]]:
             out[-1] += r
         else:
             out.append(list(r))
-        prev = r
+            prev = r
     return out
 
 
