@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import html
 import re
-from .table_rules import Rule
+from .table_rules import Rule, detect_hrules
 import numpy as np
 
 from .order_post import BLOCK_CLASSES, _cluster
@@ -158,7 +158,13 @@ def table_html(boxes: np.ndarray, texts: list[str], hrules: list[Rule] | None = 
 
     A first row that is one line across most of the table is a title: it goes
     before the table as text.  The first remaining row is the header (<th>)."""
-    rows = _rows(boxes)
+    sections = _split_sections(boxes, hrules)
+    sec_rows = [
+        [[sec[i] for i in r] for r in _rows(boxes[sec])]
+        for sec in sections
+    ]
+    rows = [r for sr in sec_rows for r in sr]
+
     span_x = boxes[:, 2].max() - boxes[:, 0].min()
     if (
         len(rows) > 2
@@ -170,11 +176,19 @@ def table_html(boxes: np.ndarray, texts: list[str], hrules: list[Rule] | None = 
         return (
             texts[rows[0][0]]
             + "\n\n"
-            + table_html(boxes[keep], [texts[k] for k in keep])
+            + table_html(boxes[keep], [texts[k] for k in keep], hrules=hrules)
         )
     width = max(len(r) for r in rows)
     full = [r for r in rows if len(r) == width]
-    rows = _merge_wrapped(rows, boxes)
+    
+    min_rows = 2 if len(sec_rows) > 1 else 3
+    merged = [_merge_wrapped(sr, boxes, min_rows=min_rows) for sr in sec_rows]
+    rows = [r for sr in merged for r in sr]
+    if len(merged) >= 2 and 1 <= len(merged[0]) <= 3 and len(merged[0]) < len(rows):
+        n_head = len(merged[0])
+    else:
+        n_head = 1 if len(rows) > 1 else 0
+
     # Column bands from the rows with the most cells: those rows rarely span.
     bands = np.array(
         [
@@ -193,7 +207,7 @@ def table_html(boxes: np.ndarray, texts: list[str], hrules: list[Rule] | None = 
     )
     out = ["<table>"]
     for ri, r in enumerate(rows):
-        tag = "th" if ri == 0 and len(rows) > 1 else "td"
+        tag = "th" if ri < n_head else "td"
         cells: dict[int, tuple[int, str]] = {}
         for k in sorted(r, key=lambda k: (boxes[k, 1], boxes[k, 0])):
             x0, x1 = boxes[k, 0], boxes[k, 2]
@@ -338,6 +352,7 @@ def page_markdown(
     cells: dict | None = None,
     tab: np.ndarray | None = None,
     pictures: np.ndarray | None = None,
+    gray: np.ndarray | None = None,
 ) -> str:
     """Markdown for one page.  boxes [N, 4], texts [N], order = reading order,
     cls_logits [N, C], same [N, N] (logit "same block").  ``cells`` maps a line
@@ -349,7 +364,7 @@ def page_markdown(
     part_boxes: list = []
     for blk in split_blocks(order, same):
         n_parts = len(parts)
-        _block_part(parts, blk, boxes, texts, cls_logits, keep_furniture, cells, tab)
+        _block_part(parts, blk, boxes, texts, cls_logits, keep_furniture, cells, tab, gray)
         if len(parts) > n_parts:
             b = boxes[blk, :4]
             part_boxes.append(
@@ -377,7 +392,7 @@ def page_markdown(
     return "\n\n".join(p for p in parts if p)
 
 
-def _block_part(parts, blk, boxes, texts, cls_logits, keep_furniture, cells, tab):
+def _block_part(parts, blk, boxes, texts, cls_logits, keep_furniture, cells, tab, gray: np.ndarray | None = None):
     """Append one block's markdown to ``parts`` (nothing for dropped furniture)."""
     cls = int(cls_logits[blk].sum(0).argmax())
     texts_b = [texts[i] for i in blk]
@@ -401,7 +416,21 @@ def _block_part(parts, blk, boxes, texts, cls_logits, keep_furniture, cells, tab
             for bx, tx in (cells or {}).get(i) or [(boxes[i, :4], texts[i])]:
                 cb.append(bx)
                 ct.append(tx)
-        parts.append(table_html(np.array(cb, np.float32).reshape(-1, 4), ct))
+        cb_arr = np.array(cb, np.float32).reshape(-1, 4)
+        hrules: list[Rule] | None = None
+        if gray is not None and len(cb_arr):
+            pad = 12
+            H, W = gray.shape
+            x0 = max(0, int(cb_arr[:, 0].min()) - pad)
+            y0 = max(0, int(cb_arr[:, 1].min()) - pad)
+            x1 = min(W, int(cb_arr[:, 2].max()) + pad)
+            y1 = min(H, int(cb_arr[:, 3].max()) + pad)
+            med_h = float(np.median(cb_arr[:, 3] - cb_arr[:, 1]))
+            hrules = [
+                Rule(r.x0 + x0, r.y0 + y0, r.x1 + x0, r.y1 + y0)
+                for r in detect_hrules(gray[y0:y1, x0:x1], line_h=med_h)
+            ]
+        parts.append(table_html(cb_arr, ct, hrules=hrules))
     elif cls == LIST:
         items: list[list[str]] = []
         for t in texts_b:

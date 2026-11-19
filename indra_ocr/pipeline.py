@@ -783,6 +783,7 @@ class OrtOCR:
             t,
             vertical=vertical,
             pictures=None if vertical else pictures,
+            gray=gray,
         )
         page.rotation, page.skew = (0 if vertical else 90 * k), round(skew, 2)
         page.vertical = vertical
@@ -812,6 +813,7 @@ class OrtOCR:
         t: dict,
         vertical: bool = False,
         pictures: np.ndarray | None = None,
+        gray: np.ndarray | None = None,
     ) -> Page:
         """Lines -> split at wide gaps -> reading order -> markdown.
 
@@ -917,6 +919,7 @@ class OrtOCR:
                 cells=cells,
                 tab=layout[2],
                 pictures=geo(pictures) if has_pics else None,
+                gray=(gray[:, ::-1] if (gray is not None and self._page_rtl) else gray),
             )
             if (
                 has_pics

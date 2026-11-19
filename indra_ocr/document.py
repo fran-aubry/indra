@@ -329,6 +329,7 @@ class Converter:
             kept_rec,
             t,
             vertical=vertical,
+            gray=gray,
         )
         out.source = source
         out.rotation = 90 * turn
