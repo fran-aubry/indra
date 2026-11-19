@@ -120,7 +120,7 @@ def _merge_wrapped(rows: list[list[int]], boxes: np.ndarray) -> list[list[int]]:
     return out
 
 
-def table_html(boxes: np.ndarray, texts: list[str]) -> str:
+def table_html(boxes: np.ndarray, texts: list[str], hrules: list[tuple[int, int, int, int ]] | None = None) -> str:
     """An HTML table from cell lines (one text line per cell, as born-digital PDFs give).
 
     A first row that is one line across most of the table is a title: it goes
