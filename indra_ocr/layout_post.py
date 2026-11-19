@@ -140,16 +140,23 @@ def _merge_wrapped(rows: list[list[int]], boxes: np.ndarray, min_rows: int = 3) 
         float(boxes[nxt, 1].min() - boxes[cur, 3].max())
         for cur, nxt in zip(rows[:-1], rows[1:])
     ]
-    med = float(np.median(gaps)) if len(rows) >= 3 else None
+    max_cols = max(len(r) for r in rows)
+    row_gaps = [
+        g
+        for g, cur, nxt in zip(gaps, rows[:-1], rows[1:])
+        if len(nxt) >= len(cur) and len(nxt) > 1
+    ]
+    med = float(np.median(row_gaps or gaps)) if len(rows) >= 3 else None
     out = [list(rows[0])]
-    prev = rows[0]
+    head = last = rows[0]
     for g, r in zip(gaps, rows[1:]):
-        # A continuation fills only the wrapped columns: fewer lines than the row above.
-        if (med is None or g < 0.5 * med) and g < 0.6 * h and len(r) < len(prev):
+        # A continuation fills a non-increasing subset of the row's wrapped columns.
+        if (med is None or g < 0.5 * med) and g < 0.6 * h and len(r) < len(head) and len(r) <= len(last):
             out[-1] += r
         else:
             out.append(list(r))
-            prev = r
+            head = r
+        last = r
     return out
 
 
