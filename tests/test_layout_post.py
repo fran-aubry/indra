@@ -24,3 +24,22 @@ def test_merge_wrapped_three_line_cell():
         [8, 9, 10],
         [11, 12, 13],
     ]
+
+def test_merge_wrapped_two_line_section():
+    boxes = np.array([
+        [0, 10, 100, 30], [150, 10, 250, 30],  # line 0 (len=2)
+        [150, 34, 250, 54],                    # line 1 (len=1, gap=4px < 0.6*20)
+    ], np.float32)
+    rows = [[0, 1], [2]]
+    # Default min_rows=3 leaves 2-line borderless tables untouched
+    assert _merge_wrapped(rows, boxes) == [[0, 1], [2]]
+    # min_rows=2 merges the wrapped continuation inside a bordered section
+    assert _merge_wrapped(rows, boxes, min_rows=2) == [[0, 1, 2]]
+
+def test_merge_wrapped_two_full_rows_stay_separate():
+    boxes = np.array([
+        [0, 10, 100, 30], [150, 10, 250, 30],  # row 0 (len=2)
+        [0, 34, 100, 54], [150, 34, 250, 54],  # row 1 (len=2, same width)
+    ], np.float32)
+    rows = [[0, 1], [2, 3]]
+    assert _merge_wrapped(rows, boxes, min_rows=2) == [[0, 1], [2, 3]]

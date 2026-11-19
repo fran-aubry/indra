@@ -126,26 +126,26 @@ def _rows(boxes: np.ndarray) -> list[list[int]]:
     return [sorted(r, key=lambda k: boxes[k, 0]) for r in rows]
 
 
-def _merge_wrapped(rows: list[list[int]], boxes: np.ndarray) -> list[list[int]]:
+def _merge_wrapped(rows: list[list[int]], boxes: np.ndarray, min_rows: int = 3) -> list[list[int]]:
     """Join the line rows of wrapped cells into one table row.
 
     Inside a wrapped cell the gap to the next line is the font's line gap; a new
     table row adds cell padding.  A row joins the row above when its gap is under
     half the table's median row gap and under 0.6 line heights, and it has fewer
     lines than the row above (a continuation fills only the wrapped columns)."""
-    if len(rows) < 3:
+    if len(rows) < max(min_rows, 2):
         return rows
     h = float(np.median(boxes[:, 3] - boxes[:, 1]))
     gaps = [
         float(boxes[nxt, 1].min() - boxes[cur, 3].max())
         for cur, nxt in zip(rows[:-1], rows[1:])
     ]
-    med = float(np.median(gaps))
+    med = float(np.median(gaps)) if len(rows) >= 3 else None
     out = [list(rows[0])]
     prev = rows[0]
     for g, r in zip(gaps, rows[1:]):
         # A continuation fills only the wrapped columns: fewer lines than the row above.
-        if g < 0.5 * med and g < 0.6 * h and len(r) < len(prev):
+        if (med is None or g < 0.5 * med) and g < 0.6 * h and len(r) < len(prev):
             out[-1] += r
         else:
             out.append(list(r))
