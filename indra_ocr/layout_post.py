@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import html
 import re
-
+from .table_rules import Rule
 import numpy as np
 
 from .order_post import BLOCK_CLASSES, _cluster
@@ -79,6 +79,39 @@ def split_blocks(order: list[int], same: np.ndarray) -> list[list[int]]:
             blocks.append([i])
     return blocks
 
+def _split_sections(boxes: np.ndarray, hrules: list[Rule] | None) -> list[list[int]]:
+    """Partition box indexes top-to-bottom using full horizontal dividing rules."""
+    n = len(boxes)
+    if n == 0:
+        return []
+    if not hrules:
+        return [list(range(n))]
+    
+    span_x = float(boxes[:, 2].max() - boxes[:, 0].min())
+    box_h = boxes[:, 3] - boxes[:, 1]
+    med_h = float(np.median(box_h))
+
+    # Dividers are rules that are wide enough, don't cut any horizontal text box    
+    dividers = [
+        r for r in hrules if r.width >= 0.5 * span_x and not any(
+            box_h[k] <= 2.5 * med_h and r.cuts_box(*boxes[k, :4])
+            for k in range(n)
+        )
+    ]
+    if not dividers:
+        return [list(range(n))]
+
+    buckets: list[list[int]] = [
+        [] for _ in range(len(dividers) + 1)
+    ]
+    center_x = (boxes[:, 0] + boxes[:, 2]) / 2
+    center_y = (boxes[:, 1] + boxes[:, 3]) / 2
+    for k in range(n):
+        sec_idx = sum(1 for r in dividers if r.y_at(float(center_x[k])) < float(center_y[k]))
+        buckets[sec_idx].append(k)
+
+    return [b for b in buckets if b]
+
 
 def _rows(boxes: np.ndarray) -> list[list[int]]:
     """Group cell lines into rows by vertical centre, top to bottom, left to right."""
@@ -120,7 +153,7 @@ def _merge_wrapped(rows: list[list[int]], boxes: np.ndarray) -> list[list[int]]:
     return out
 
 
-def table_html(boxes: np.ndarray, texts: list[str], hrules: list[tuple[int, int, int, int ]] | None = None) -> str:
+def table_html(boxes: np.ndarray, texts: list[str], hrules: list[Rule] | None = None) -> str:
     """An HTML table from cell lines (one text line per cell, as born-digital PDFs give).
 
     A first row that is one line across most of the table is a title: it goes

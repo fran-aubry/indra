@@ -1,15 +1,41 @@
 from __future__ import annotations
-
+from typing import NamedTuple
 import numpy as np
 
 
-Rule = tuple[int, int, int, int]
+class Rule(NamedTuple):
 
+    x0: int
+    y0: int
+    x1: int
+    y1: int
 
-def _y_at(seg: Rule, x: float) -> float:
-    """Linearly interpolate a segment's y-coordinate at horizontal position ``x``."""
-    x0, y0, x1, y1 = seg
-    return y0 + (y1 - y0) * (x - x0) / max(x1 - x0, 1)
+    @property
+    def width(self) -> int:
+        return self.x1 - self.x0
+    
+    @property
+    def slope(self) -> float:
+        return (self.y1 - self.y0) / max(self.width, 1)
+
+    def y_at(self, x: float) -> float:
+        """Linearly interpolate y at horizontal position ``x``."""
+        return self.y0 + self.slope * (x - self.x0)
+
+    def cuts_box(
+        self, 
+        x0: float, 
+        y0: float, 
+        x1: float, 
+        y1: float, 
+        margin: float = 0.25
+    ) -> bool:
+        """True if this rule passes through the vertical interior of a box."""
+        if x0 >= self.x1 or x1 <= self.x0:
+            return False
+        h = y1 - y0
+        y = self.y_at((x0 + x1) / 2)
+        return y0 + margin * h < y < y1 - margin * h
 
 
 def _same_rule(
@@ -20,25 +46,21 @@ def _same_rule(
     max_dm: float = 0.04,
 ) -> bool:
     """True when two segments lie on the same rule (close in slope, x, and y)."""
-    ax0, ay0, ax1, ay1 = a
-    bx0, by0, bx1, by1 = b
-    ma = (ay1 - ay0) / max(ax1 - ax0, 1)
-    mb = (by1 - by0) / max(bx1 - bx0, 1)
-    if abs(ma - mb) > max_dm:
+    if abs(a.slope - b.slope) > max_dm:
         return False
 
-    x_lo = max(ax0, bx0)
-    x_hi = min(ax1, bx1)
+    x_lo = max(a.x0, b.x0)
+    x_hi = min(a.x1, b.x1)
     if x_lo - x_hi > max_gap_x:  # too far apart horizontally (e.g. separate \cmidrules)
         return False
 
     if x_lo <= x_hi:
         return (
-            abs(_y_at(a, x_lo) - _y_at(b, x_lo)) <= max_dy
-            and abs(_y_at(a, x_hi) - _y_at(b, x_hi)) <= max_dy
+            abs(a.y_at(x_lo) - b.y_at(x_lo)) <= max_dy
+            and abs(a.y_at(x_hi) - b.y_at(x_hi)) <= max_dy
         )
     xm = (x_lo + x_hi) / 2
-    return abs(_y_at(a, xm) - _y_at(b, xm)) <= max_dy
+    return abs(a.y_at(xm) - b.y_at(xm)) <= max_dy
 
 
 def _fit_cluster(cluster: list[Rule]) -> Rule:
@@ -52,7 +74,7 @@ def _fit_cluster(cluster: list[Rule]) -> Rule:
     m, b = np.polyfit(xs, ys, 1, w=ws)
     xmin = min(s[0] for s in cluster)
     xmax = max(s[2] for s in cluster)
-    return (int(xmin), int(round(m * xmin + b)), int(xmax), int(round(m * xmax + b)))
+    return Rule(int(xmin), int(round(m * xmin + b)), int(xmax), int(round(m * xmax + b)))
 
 
 def _merge_rules(segs: list[Rule]) -> list[Rule]:
@@ -124,7 +146,7 @@ def detect_hrules(
             x0, y0, x1, y1 = x1, y1, x0, y0
         dx, dy = x1 - x0, abs(y1 - y0)
         if dx > 0 and np.degrees(np.arctan2(dy, dx)) <= max_angle_deg:
-            segs.append((int(x0), int(y0), int(x1), int(y1)))
+            segs.append(Rule(int(x0), int(y0), int(x1), int(y1)))
 
     # Step 3: Merge duplicate edges and segments split by vertical grid crossings.
     return _merge_rules(segs)
