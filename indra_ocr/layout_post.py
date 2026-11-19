@@ -126,7 +126,12 @@ def _rows(boxes: np.ndarray) -> list[list[int]]:
     return [sorted(r, key=lambda k: boxes[k, 0]) for r in rows]
 
 
-def _merge_wrapped(rows: list[list[int]], boxes: np.ndarray, min_rows: int = 3) -> list[list[int]]:
+def _merge_wrapped(
+    rows: list[list[int]],
+    boxes: np.ndarray,
+    min_rows: int = 3,
+    med_gap: float | None = None,
+) -> list[list[int]]:
     """Join the line rows of wrapped cells into one table row.
 
     Inside a wrapped cell the gap to the next line is the font's line gap; a new
@@ -140,13 +145,19 @@ def _merge_wrapped(rows: list[list[int]], boxes: np.ndarray, min_rows: int = 3) 
         float(boxes[nxt, 1].min() - boxes[cur, 3].max())
         for cur, nxt in zip(rows[:-1], rows[1:])
     ]
-    max_cols = max(len(r) for r in rows)
     row_gaps = [
         g
         for g, cur, nxt in zip(gaps, rows[:-1], rows[1:])
         if len(nxt) >= len(cur) and len(nxt) > 1
     ]
-    med = float(np.median(row_gaps or gaps)) if len(rows) >= 3 else None
+    if len(row_gaps) >= 2:
+        med: float | None = float(np.median(row_gaps))
+    elif med_gap is not None:
+        med = med_gap
+    elif len(rows) >= 3:
+        med = float(np.median(row_gaps or gaps))
+    else:
+        med = None
     out = [list(rows[0])]
     head = last = rows[0]
     for g, r in zip(gaps, rows[1:]):
@@ -189,7 +200,16 @@ def table_html(boxes: np.ndarray, texts: list[str], hrules: list[Rule] | None = 
     full = [r for r in rows if len(r) == width]
     
     min_rows = 2 if len(sec_rows) > 1 else 3
-    merged = [_merge_wrapped(sr, boxes, min_rows=min_rows) for sr in sec_rows]
+    all_row_gaps = [
+        float(boxes[nxt, 1].min() - boxes[cur, 3].max())
+        for cur, nxt in zip(rows[:-1], rows[1:])
+        if len(nxt) >= len(cur) and len(nxt) > 1
+    ]
+    med_gap = float(np.median(all_row_gaps)) if len(all_row_gaps) >= 2 else None
+    merged = [
+        _merge_wrapped(sr, boxes, min_rows=min_rows, med_gap=med_gap)
+        for sr in sec_rows
+    ]
     rows = [r for sr in merged for r in sr]
     if len(merged) >= 2 and 1 <= len(merged[0]) <= 3 and len(merged[0]) < len(rows):
         n_head = len(merged[0])
