@@ -24,7 +24,7 @@ import cv2
 import numpy as np
 
 from .det_post import decode, page_to_input
-from .layout_post import page_blocks, page_markdown
+from .layout_post import page_blocks, page_markdown, split_blocks
 from .line_mask import crop_lines, line_darkness
 from .math import MATH_MIN_CONF, MathReader
 from .order_post import (
@@ -39,6 +39,7 @@ from .order_post import (
 from .rec_preproc import PAD_X, pad_batch, width_batches
 from .rtl import flip, has_rtl, is_rtl
 from .vocab import Vocab
+from .table_rules import Rule, detect_vrules
 
 ADAPTIVE_MIN_H = (
     9.0  # median line height (input px) that triggers a second detection pass
@@ -592,6 +593,41 @@ class OrtOCR:
                 sure[j] = pk > ROUTE_SURE
         return out, sure
 
+    def _table_vrule_cuts(
+        self,
+        boxes: np.ndarray,
+        order: list[int],
+        layout: tuple,
+        gray: np.ndarray | None,
+    ) -> dict[int, list[float]]:
+        if gray is None or len(boxes) == 0:
+            return {}
+        table_cls = BLOCK_CLASSES.index("Table")
+        H, W = gray.shape
+        cuts: dict[int, list[float]] = {}
+        for blk in split_blocks(order, layout[1]):
+            if len(blk) <= 1 or int(layout[0][blk].sum(0).argmax()) != table_cls:
+                continue
+            b = boxes[blk, :4]
+            pad = 12
+            x0 = max(0, int(b[:, 0].min()) - pad)
+            y0 = max(0, int(b[:, 1].min()) - pad)
+            x1 = min(W, int(b[:, 2].max()) + pad)
+            y1 = min(H, int(b[:, 3].max()) + pad)
+            med_h = float(np.median(b[:, 3] - b[:, 1]))
+            vrules = [
+                Rule(r.x0 + x0, r.y0 + y0, r.x1 + x0, r.y1 + y0)
+                for r in detect_vrules(gray[y0:y1, x0:x1], line_h=med_h)
+            ]
+            if not vrules:
+                continue
+            for i in blk:
+                cy = float(boxes[i, 1] + boxes[i, 3]) / 2
+                xs = [r.x_at(cy) for r in vrules if r.y0 <= cy <= r.y1]
+                if xs:
+                    cuts[i] = xs
+        return cuts
+
     def gutter_cuts(self, boxes: np.ndarray, rec: list) -> list[list[float]]:
         """Per line, the x positions of gaps that sit on a column gutter: a gap over
         GUTTER_GAP line heights where at least GUTTER_EDGES other lines end at its
@@ -900,11 +936,12 @@ class OrtOCR:
             blocks = page_blocks(geo(boxes[:, :4]), texts, order, layout[0], layout[1])
             for b in blocks:  # back on the page as it is
                 b["bbox"] = [round(float(v), 1) for v in geo(np.array(b["bbox"]))]
-            # Inside tables, labels split cells at smaller gaps (CELL_GAP).
+            # Inside tables, labels split cells at smaller gaps (CELL_GAP) and at drawn vertical rules.
+            vcuts = self._table_vrule_cuts(boxes, order, layout, gray)
             cells = {
                 i: [
                     (list(geo(np.array(bx, np.float32))), tx)
-                    for bx, tx, _ in self.split_line(boxes[i], rec[i][2], CELL_GAP)
+                    for bx, tx, _ in self.split_line(boxes[i], rec[i][2], CELL_GAP, at=vcuts.get(i))
                 ]
                 for i in range(len(boxes))
             }
