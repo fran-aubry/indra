@@ -248,6 +248,7 @@ def _header_rows(
     raw_rows = [[header_indices[i] for i in row] for row in _rows(sec_boxes)]
     if len(raw_rows) <= 1:
         return raw_rows
+    med_h = float(np.median(sec_boxes[:, 3] - sec_boxes[:, 1]))
 
     # With cmidrules: each cmidrule level defines a horizontal y-cut across the header,
     # just like _split_sections does for full-width table dividers.
@@ -261,27 +262,69 @@ def _header_rows(
         for k, cy in enumerate(center_y):
             tier_idx = sum(1 for ly in level_ys if ly < float(cy))
             tiers[tier_idx].append(header_indices[k])
+        # A cmidrule only divides the columns it covers: if an upper-tier box sits
+        # outside cmid_levels[t] and wraps tightly over a single child in tiers[t + 1],
+        # move it down so ungrouped multi-line leaf headers stay together.
+        for tier_idx in range(len(tiers) - 1):
+            kept_in_tier: list[int] = []
+            for box_idx in tiers[tier_idx]:
+                overlaps_rule = any(
+                    _overlaps_x(
+                        float(boxes[box_idx, 0]), float(boxes[box_idx, 2]),
+                        rule.x0, rule.x1,
+                    )
+                    for rule in cmid_levels[tier_idx]
+                )
+                children = [
+                    child_idx
+                    for child_idx in tiers[tier_idx + 1]
+                    if _overlaps_x(
+                        float(boxes[box_idx, 0]), float(boxes[box_idx, 2]),
+                        float(boxes[child_idx, 0]), float(boxes[child_idx, 2]),
+                    )
+                ]
+                if (
+                    not overlaps_rule
+                    and len(children) == 1
+                    and float(boxes[children[0], 1] - boxes[box_idx, 3]) < 0.6 * med_h
+                ):
+                    tiers[tier_idx + 1].append(box_idx)
+                else:
+                    kept_in_tier.append(box_idx)
+            tiers[tier_idx] = kept_in_tier
         return [tier for tier in tiers if tier]
 
     # No cmidrules: merge consecutive visual lines only when their vertical gap is
     # tight line-wrapping (< 0.6 * med_h) and not an unlined super-header row.
-    med_h = float(np.median(sec_boxes[:, 3] - sec_boxes[:, 1]))
     merged_rows = [list(raw_rows[0])]
-    for cur_row, next_row in zip(raw_rows[:-1], raw_rows[1:]):
+    for idx in range(len(raw_rows) - 1):
+        cur_row, next_row = raw_rows[idx], raw_rows[idx + 1]
         row_gap = float(boxes[next_row, 1].min() - boxes[cur_row, 3].max())
         is_super_header_row = False
-        if len(cur_row) < len(next_row):
-            for parent in cur_row:
-                overlaps = sum(
-                    _overlaps_x(
-                        boxes[parent, 0], boxes[parent, 2],
-                        boxes[child, 0], boxes[child, 2],
-                    )
-                    for child in next_row
+        for parent in cur_row:
+            next_overlaps = sum(
+                _overlaps_x(
+                    boxes[parent, 0], boxes[parent, 2],
+                    boxes[child, 0], boxes[child, 2],
                 )
-                if overlaps >= 2:
-                    is_super_header_row = True
-                    break
+                for child in next_row
+            )
+            if next_overlaps == 1:
+                continue  # 1-to-1 wrapped continuation on next_row -> allow merge
+            for lower_row in raw_rows[idx + 1:]:
+                if len(cur_row) < len(lower_row):
+                    overlaps = sum(
+                        _overlaps_x(
+                            boxes[parent, 0], boxes[parent, 2],
+                            boxes[child, 0], boxes[child, 2],
+                        )
+                        for child in lower_row
+                    )
+                    if overlaps >= 2:
+                        is_super_header_row = True
+                        break
+            if is_super_header_row:
+                break
         if row_gap < 0.6 * med_h and not is_super_header_row:
             merged_rows[-1].extend(next_row)
         else:

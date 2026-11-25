@@ -148,3 +148,40 @@ def test_table_html_shared_cmidrule_splits_between_super_headers():
     html = table_html(boxes, texts, hrules=hrules)
     rows_html = [line for line in html.splitlines() if line.startswith("<tr>")]
     assert rows_html[0] == '<tr><th></th><th colspan="2">Oxygenase</th><th colspan="2">Reductase</th><th></th></tr>'
+
+
+def test_table_html_unlined_super_header_with_centered_col():
+    boxes = np.array([
+        [150, 10, 310, 30],                     # row 0: super-header "Number"
+        [0, 32, 90, 52],                        # row 1: centered col 0 "Author"
+        [150, 54, 220, 74], [240, 54, 310, 74], # row 2: children "Benign", "Normal"
+        [0, 95, 90, 115], [150, 95, 220, 115], [240, 95, 310, 115],
+        [0, 130, 90, 150], [150, 130, 220, 150], [240, 130, 310, 150],
+    ], np.float32)
+    texts = ["Number", "Author", "Benign", "Normal", "Lee", "3", "4", "Kim", "5", "6"]
+    html = table_html(boxes, texts, hrules=[Rule(0, 84, 310, 84)])
+
+    rows_html = [line for line in html.splitlines() if line.startswith("<tr>")]
+    assert rows_html[0] == '<tr><th></th><th colspan="2">Number</th></tr>'
+    assert rows_html[1] == "<tr><th>Author</th><th>Benign</th><th>Normal</th></tr>"
+
+
+def test_table_html_ungrouped_wrapped_header_next_to_cmidrule():
+    boxes = np.array([
+        [0, 10, 90, 30], [240, 10, 400, 30],    # row 0: "Mean of" & "95% CI"
+        [0, 36, 90, 56],                        # row 1: "mortality" (gap=6 < 0.6*20)
+        [240, 56, 310, 76], [330, 56, 400, 76], # row 2: "Lower", "Upper"
+        [0, 96, 90, 116], [240, 96, 310, 116], [330, 96, 400, 116],
+        [0, 130, 90, 150], [240, 130, 310, 150], [330, 130, 400, 150],
+    ], np.float32)
+    texts = [
+        "Mean of", "95% CI", "mortality", "Lower", "Upper",
+        "84", "75", "91", "90", "82", "96",
+    ]
+    hrules = [Rule(240, 38, 400, 38), Rule(0, 86, 400, 86)]
+    html = table_html(boxes, texts, hrules=hrules)
+
+    rows_html = [line for line in html.splitlines() if line.startswith("<tr>")]
+    assert rows_html[0] == '<tr><th></th><th colspan="2">95% CI</th></tr>'
+    assert rows_html[1] == "<tr><th>Mean of mortality</th><th>Lower</th><th>Upper</th></tr>"
+
