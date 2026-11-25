@@ -171,6 +171,193 @@ def _merge_wrapped(
     return out
 
 
+def _overlaps_x(left_a: float, right_a: float, left_b: float, right_b: float) -> bool:
+    """Whether horizontal intervals [left_a, right_a] and [left_b, right_b] overlap."""
+    overlap_left = max(left_a, left_b)
+    overlap_right = min(right_a, right_b)
+    return overlap_right > overlap_left
+
+
+def _header_cmidrules(
+    header_indices: list[int],
+    boxes: np.ndarray,
+    hrules: list[Rule] | None,
+) -> list[list[Rule]]:
+    """Find internal cmid rules in a header section, grouped top-to-bottom by y."""
+    # Need at least 2 boxes (one above, one below) for an internal rule to exist.
+    if len(header_indices) <= 1 or not hrules:
+        return []
+    sec_boxes = boxes[header_indices, :4]
+    box_h = sec_boxes[:, 3] - sec_boxes[:, 1]
+    med_h = float(np.median(box_h))
+    center_x = (sec_boxes[:, 0] + sec_boxes[:, 2]) / 2
+    center_y = (sec_boxes[:, 1] + sec_boxes[:, 3]) / 2
+    min_y = float(sec_boxes[:, 1].min())
+    max_y = float(sec_boxes[:, 3].max())
+
+    cmid_rules: list[Rule] = []
+    for rule in hrules:
+        rule_mid_y = (rule.y0 + rule.y1) / 2
+        # Rules that don't lay between the span of y coordinates defined by the
+        # boxes in this section arent cmid rules.
+        if not (min_y < rule_mid_y < max_y):
+            continue
+        # Skip false-positive Hough segments caused by glyph strokes slicing through a
+        # normal-height text box (tall boxes > 2.5 * med_h are rotated vertical text).
+        if any(
+            box_h[k] <= 2.5 * med_h and rule.cuts_box(*sec_boxes[k])
+            for k in range(len(header_indices))
+        ):
+            continue
+        # A true cmidrule must separate at least one box above it from one below it.
+        overlapping_boxes = [
+            k for k in range(len(header_indices))
+            if _overlaps_x(sec_boxes[k, 0], sec_boxes[k, 2], rule.x0, rule.x1)
+        ]
+        has_box_above = any(
+            center_y[k] < rule.y_at(float(center_x[k]))
+            for k in overlapping_boxes
+        )
+        has_box_below = any(
+            center_y[k] > rule.y_at(float(center_x[k]))
+            for k in overlapping_boxes
+        )
+        if has_box_above and has_box_below:
+            cmid_rules.append(rule)
+
+    # Cluster cmidrules at the same y-height (within half a line height).
+    cmid_rules.sort(key=lambda r: (r.y0 + r.y1) / 2)
+    levels: list[list[Rule]] = []
+    for rule in cmid_rules:
+        rule_mid_y = (rule.y0 + rule.y1) / 2
+        prev_mid_y = (levels[-1][-1].y0 + levels[-1][-1].y1) / 2 if levels else 0.0
+        if levels and rule_mid_y - prev_mid_y <= 0.5 * med_h:
+            levels[-1].append(rule)
+        else:
+            levels.append([rule])
+    return levels
+
+
+def _header_rows(
+    header_indices: list[int],
+    boxes: np.ndarray,
+    cmid_levels: list[list[Rule]],
+) -> list[list[int]]:
+    """Group header-section boxes into <th> tier rows using internal cmid rules."""
+    sec_boxes = boxes[header_indices, :4]
+    raw_rows = [[header_indices[i] for i in row] for row in _rows(sec_boxes)]
+    if len(raw_rows) <= 1:
+        return raw_rows
+
+    # With cmidrules: each cmidrule level defines a horizontal y-cut across the header,
+    # just like _split_sections does for full-width table dividers.
+    if cmid_levels:
+        level_ys = [
+            float(np.median([(rule.y0 + rule.y1) / 2 for rule in level]))
+            for level in cmid_levels
+        ]
+        tiers: list[list[int]] = [[] for _ in range(len(level_ys) + 1)]
+        center_y = (sec_boxes[:, 1] + sec_boxes[:, 3]) / 2
+        for k, cy in enumerate(center_y):
+            tier_idx = sum(1 for ly in level_ys if ly < float(cy))
+            tiers[tier_idx].append(header_indices[k])
+        return [tier for tier in tiers if tier]
+
+    # No cmidrules: merge consecutive visual lines only when their vertical gap is
+    # tight line-wrapping (< 0.6 * med_h) and not an unlined super-header row.
+    med_h = float(np.median(sec_boxes[:, 3] - sec_boxes[:, 1]))
+    merged_rows = [list(raw_rows[0])]
+    for cur_row, next_row in zip(raw_rows[:-1], raw_rows[1:]):
+        row_gap = float(boxes[next_row, 1].min() - boxes[cur_row, 3].max())
+        is_super_header_row = False
+        if len(cur_row) < len(next_row):
+            for parent in cur_row:
+                overlaps = sum(
+                    _overlaps_x(
+                        boxes[parent, 0], boxes[parent, 2],
+                        boxes[child, 0], boxes[child, 2],
+                    )
+                    for child in next_row
+                )
+                if overlaps >= 2:
+                    is_super_header_row = True
+                    break
+        if row_gap < 0.6 * med_h and not is_super_header_row:
+            merged_rows[-1].extend(next_row)
+        else:
+            merged_rows.append(list(next_row))
+    return merged_rows
+    
+
+def _header_col_spans(
+    row: list[int],
+    boxes: np.ndarray,
+    bands: np.ndarray,
+    cmid_levels: list[list[Rule]],
+) -> dict[int, list[int]]:
+    """Expand upper-tier header boxes across the columns covered by their cmid rules."""
+    if not cmid_levels or not row:
+        return {}
+
+    # 1. Group horizontally overlapping boxes (wrapped lines of one super-header).
+    groups: list[tuple[float, float, float, list[int]]] = []
+    for k in sorted(row, key=lambda idx: boxes[idx, 0]):
+        left_x, right_x = float(boxes[k, 0]), float(boxes[k, 2])
+        mid_y = float((boxes[k, 1] + boxes[k, 3]) / 2)
+        if groups and _overlaps_x(left_x, right_x, groups[-1][0], groups[-1][1]):
+            prev_x0, prev_x1, prev_y, box_ids = groups[-1]
+            groups[-1] = (
+                min(prev_x0, left_x),
+                max(prev_x1, right_x),
+                max(prev_y, mid_y),
+                box_ids + [k],
+            )
+        else:
+            groups.append((left_x, right_x, mid_y, [k]))
+
+    # 2. Widen each group's x-range to include the cmidrule(s) directly below it.
+    expanded_spans: dict[int, tuple[float, float]] = {}
+    for group_idx, (left_x, right_x, mid_y, _) in enumerate(groups):
+        mid_x = (left_x + right_x) / 2
+        for level in cmid_levels:
+            matching_rules = [
+                rule
+                for rule in level
+                if _overlaps_x(left_x, right_x, rule.x0, rule.x1)
+                and mid_y < rule.y_at(mid_x)
+            ]
+            if matching_rules:
+                span_x0 = min(left_x, *(float(rule.x0) for rule in matching_rules))
+                span_x1 = max(right_x, *(float(rule.x1) for rule in matching_rules))
+                expanded_spans[group_idx] = (span_x0, span_x1)
+                break
+
+    # 3. Assign each covered column to the closest claiming super-header group
+    #    (splits shared cmidrules like "Oxygenase | Ferredoxin | Reductase").
+    assigned_cols: dict[int, list[int]] = {g: [] for g in expanded_spans}
+    for col in range(len(bands)):
+        claimants = [
+            group_idx
+            for group_idx, (span_x0, span_x1) in expanded_spans.items()
+            if _overlaps_x(float(bands[col, 0]), float(bands[col, 1]), span_x0, span_x1)
+        ]
+        if claimants:
+            col_center = float((bands[col, 0] + bands[col, 1]) / 2)
+            winner = min(
+                claimants,
+                key=lambda g: abs(col_center - (groups[g][0] + groups[g][1]) / 2),
+            )
+            assigned_cols[winner].append(col)
+
+    col_spans: dict[int, list[int]] = {}
+    for group_idx, cols in assigned_cols.items():
+        if cols:
+            contiguous_cols = list(range(min(cols), max(cols) + 1))
+            for box_idx in groups[group_idx][3]:
+                col_spans[box_idx] = contiguous_cols
+    return col_spans
+
+
 def table_html(boxes: np.ndarray, texts: list[str], hrules: list[Rule] | None = None) -> str:
     """An HTML table from cell lines (one text line per cell, as born-digital PDFs give).
 
@@ -206,14 +393,26 @@ def table_html(boxes: np.ndarray, texts: list[str], hrules: list[Rule] | None = 
         if len(nxt) >= len(cur) and len(nxt) > 1
     ]
     med_gap = float(np.median(all_row_gaps)) if len(all_row_gaps) >= 2 else None
-    merged = [
-        _merge_wrapped(sr, boxes, min_rows=min_rows, med_gap=med_gap)
-        for sr in sec_rows
-    ]
-    rows = [r for sr in merged for r in sr]
-    if len(merged) >= 2 and 1 <= len(merged[0]) <= 3 and len(merged[0]) < len(rows):
-        n_head = len(merged[0])
+    # When a full horizontal rule separates the header section (sections[0]) from
+    # the body, group its lines into semantic <th> tiers via cmidrules instead of
+    # body-oriented _merge_wrapped (which cannot merge full-width wrapped headers).
+    cmid_levels: list[list[Rule]] = []
+    if len(sec_rows) >= 2 and 1 <= len(sec_rows[0]) <= 6 and len(sec_rows[0]) < len(rows):
+        cmid_levels = _header_cmidrules(sections[0], boxes, hrules)
+        header_rows = _header_rows(sections[0], boxes, cmid_levels)
+        body_rows = [
+            _merge_wrapped(sr, boxes, min_rows=min_rows, med_gap=med_gap)
+            for sr in sec_rows[1:]
+        ]
+        merged = [header_rows, *body_rows]
+        rows = [r for sr in merged for r in sr]
+        n_head = len(header_rows) if len(header_rows) <= 4 else 1
     else:
+        merged = [
+            _merge_wrapped(sr, boxes, min_rows=min_rows, med_gap=med_gap)
+            for sr in sec_rows
+        ]
+        rows = [r for sr in merged for r in sr]
         n_head = 1 if len(rows) > 1 else 0
 
     # Column bands from the rows with the most cells: those rows rarely span.
@@ -235,18 +434,26 @@ def table_html(boxes: np.ndarray, texts: list[str], hrules: list[Rule] | None = 
     out = ["<table>"]
     for ri, r in enumerate(rows):
         tag = "th" if ri < n_head else "td"
+        cmid_spans = (
+            _header_col_spans(r, boxes, bands, cmid_levels)
+            if ri < n_head - 1
+            else {}
+        )
         cells: dict[int, tuple[int, str]] = {}
         for k in sorted(r, key=lambda k: (boxes[k, 1], boxes[k, 0])):
-            x0, x1 = boxes[k, 0], boxes[k, 2]
-            first = int(np.searchsorted(edges, x0, side="right") - 1)
-            last = int(np.searchsorted(edges, x1, side="right") - 1)
-            # A cell spans every band it covers by more than half of the band.
-            span = [
-                c
-                for c in range(max(first, 0), min(last, width - 1) + 1)
-                if min(x1, bands[c, 1]) - max(x0, bands[c, 0])
-                > 0.5 * (bands[c, 1] - bands[c, 0])
-            ] or [min(max(first, 0), width - 1)]
+            if k in cmid_spans:
+                span = cmid_spans[k]
+            else:
+                x0, x1 = boxes[k, 0], boxes[k, 2]
+                first = int(np.searchsorted(edges, x0, side="right") - 1)
+                last = int(np.searchsorted(edges, x1, side="right") - 1)
+                # A cell spans every band it covers by more than half of the band.
+                span = [
+                    c
+                    for c in range(max(first, 0), min(last, width - 1) + 1)
+                    if min(x1, bands[c, 1]) - max(x0, bands[c, 0])
+                    > 0.5 * (bands[c, 1] - bands[c, 0])
+                ] or [min(max(first, 0), width - 1)]
             c0 = span[0]
             prev = cells.get(c0)
             text = texts[k] if prev is None else prev[1] + " " + texts[k]

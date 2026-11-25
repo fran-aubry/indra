@@ -1,8 +1,12 @@
-from indra_ocr.table_rules import Rule
-from indra_ocr.layout_post import table_html
 import numpy as np
 
-from indra_ocr.layout_post import _merge_wrapped
+from indra_ocr.layout_post import (
+    _header_cmidrules,
+    _merge_wrapped,
+    _overlaps_x,
+    table_html,
+)
+from indra_ocr.table_rules import Rule
 
 
 def test_merge_wrapped_three_line_cell():
@@ -79,3 +83,68 @@ def test_table_html_full_grid_with_two_line_wrapped_cell():
 
     assert html.count("<tr>") == 3
     assert "<td>First line second line</td>" in html
+
+
+def test_overlaps_x():
+    assert _overlaps_x(10, 50, 30, 80) is True
+    assert _overlaps_x(10, 30, 30, 80) is False
+    assert _overlaps_x(10, 20, 30, 80) is False
+
+
+def test_table_html_wrapped_full_width_header():
+    boxes = np.array([
+        [0, 10, 90, 30], [140, 10, 240, 30],      # header line 0
+        [0, 34, 90, 54], [140, 34, 240, 54],      # header line 1 (gap=4 < 0.6*20)
+        [0, 75, 90, 95], [140, 75, 240, 95],      # body row 1
+        [0, 110, 90, 130], [140, 110, 240, 130],  # body row 2
+    ], np.float32)
+    texts = ["First", "Phone", "Name", "Number", "Alice", "123", "Bob", "456"]
+    html = table_html(boxes, texts, hrules=[Rule(0, 64, 240, 64)])
+
+    assert html.count("<tr>") == 3
+    assert "<tr><th>First Name</th><th>Phone Number</th></tr>" in html
+
+
+def test_table_html_cmidrule_expands_narrow_super_header():
+    boxes = np.array([
+        [195, 10, 245, 30],  # super-header line 0 ("Total", narrow & centered)
+        [190, 34, 250, 54],  # super-header line 1 ("sample", narrow & centered)
+        [0, 68, 90, 88], [140, 68, 200, 88], [230, 68, 290, 88], [330, 68, 400, 88],
+        [0, 110, 90, 130], [140, 110, 200, 130], [230, 110, 290, 130], [330, 110, 400, 130],
+        [0, 145, 90, 165], [140, 145, 200, 165], [230, 145, 290, 165], [330, 145, 400, 165],
+    ], np.float32)
+    texts = [
+        "Total", "sample", "Item", "n", "%", "p",
+        "A", "10", "50", "0.1", "B", "20", "50", "0.2",
+    ]
+    hrules = [
+        Rule(0, 4, 400, 4),      # outer toprule (skipped)
+        Rule(140, 60, 290, 60),  # cmidrule over cols 1..2
+        Rule(0, 98, 400, 98),    # full header divider
+    ]
+
+    assert len(_header_cmidrules([0, 1, 2, 3, 4, 5], boxes, hrules)) == 1
+    html = table_html(boxes, texts, hrules=hrules)
+    rows_html = [line for line in html.splitlines() if line.startswith("<tr>")]
+    assert rows_html[0] == '<tr><th></th><th colspan="2">Total sample</th><th></th></tr>'
+    assert rows_html[1] == "<tr><th>Item</th><th>n</th><th>%</th><th>p</th></tr>"
+
+
+def test_table_html_shared_cmidrule_splits_between_super_headers():
+    boxes = np.array([
+        [240, 10, 310, 30], [440, 10, 510, 30],  # two narrow super-headers sharing 1 rule
+        [0, 50, 150, 70], [200, 50, 260, 70], [290, 50, 350, 70],
+        [400, 50, 460, 70], [490, 50, 550, 70], [650, 50, 800, 70],
+        [0, 95, 150, 115], [200, 95, 260, 115], [290, 95, 350, 115],
+        [400, 95, 460, 115], [490, 95, 550, 115], [650, 95, 800, 115],
+    ], np.float32)
+    texts = [
+        "Oxygenase", "Reductase",
+        "Sys", "Gene", "Group", "Gene", "Struct", "Ref",
+        "R1", "a", "b", "c", "d", "e",
+    ]
+    hrules = [Rule(200, 40, 550, 40), Rule(0, 82, 800, 82)]
+
+    html = table_html(boxes, texts, hrules=hrules)
+    rows_html = [line for line in html.splitlines() if line.startswith("<tr>")]
+    assert rows_html[0] == '<tr><th></th><th colspan="2">Oxygenase</th><th colspan="2">Reductase</th><th></th></tr>'
